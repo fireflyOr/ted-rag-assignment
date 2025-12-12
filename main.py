@@ -10,7 +10,6 @@ except ImportError as e:
     print(f"CRITICAL ERROR: Missing libraries. {e}")
 
 # --- Configuration ---
-# אנחנו קוראים את המשתנים, אבל לא קורסים אם הם חסרים
 LLMOD_API_KEY = os.getenv("LLMOD_API_KEY")
 LLMOD_BASE_URL = os.getenv("LLMOD_BASE_URL", "https://api.llmod.ai/v1")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
