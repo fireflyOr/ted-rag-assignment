@@ -1,11 +1,16 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from pinecone import Pinecone
-from openai import OpenAI
 import os
 
-# --- Configuration using Environment Variables ---
-# Vercel will inject these values securely
+# --- Imports inside try-catch to prevent crash on startup ---
+try:
+    from pinecone import Pinecone
+    from openai import OpenAI
+except ImportError as e:
+    print(f"CRITICAL ERROR: Missing libraries. {e}")
+
+# --- Configuration ---
+# אנחנו קוראים את המשתנים, אבל לא קורסים אם הם חסרים
 LLMOD_API_KEY = os.getenv("LLMOD_API_KEY")
 LLMOD_BASE_URL = os.getenv("LLMOD_BASE_URL", "https://api.llmod.ai/v1")
 PINECONE_API_KEY = os.getenv("PINECONE_API_KEY")
@@ -20,21 +25,51 @@ TOP_K = 3
 
 app = FastAPI()
 
-# Validate Keys on Startup
-if not LLMOD_API_KEY or not PINECONE_API_KEY:
-    print("WARNING: API Keys not found in environment variables!")
+# --- Global Clients (Initialized lazily) ---
+client = None
+pc = None
+index = None
 
-client = OpenAI(api_key=LLMOD_API_KEY, base_url=LLMOD_BASE_URL)
-pc = Pinecone(api_key=PINECONE_API_KEY)
-index = pc.Index(PINECONE_INDEX_NAME)
+def init_clients():
+    """מנסה להתחבר רק כשצריך, כדי למנוע קריסה בהתחלה"""
+    global client, pc, index
+    
+    # בדיקת מפתחות
+    if not LLMOD_API_KEY:
+        print("❌ Error: LLMOD_API_KEY is missing in Environment Variables!")
+        return False
+    if not PINECONE_API_KEY:
+        print("❌ Error: PINECONE_API_KEY is missing in Environment Variables!")
+        return False
 
+    try:
+        if client is None:
+            print("🔄 Connecting to OpenAI/LLMod...")
+            client = OpenAI(api_key=LLMOD_API_KEY, base_url=LLMOD_BASE_URL)
+        
+        if pc is None:
+            print("🔄 Connecting to Pinecone...")
+            pc = Pinecone(api_key=PINECONE_API_KEY)
+            index = pc.Index(PINECONE_INDEX_NAME)
+            
+        return True
+    except Exception as e:
+        print(f"❌ Connection Error: {e}")
+        return False
+
+# --- Data Models ---
 class QueryRequest(BaseModel):
     question: str
 
+# --- Core Logic ---
 def retrieve_context(query):
+    if not init_clients():
+        raise Exception("Server configuration error: check logs for missing keys.")
+
     try:
         xq = client.embeddings.create(input=query, model=EMBEDDING_MODEL).data[0].embedding
         res = index.query(vector=xq, top_k=TOP_K, include_metadata=True)
+        
         contexts = []
         context_text_list = []
         for match in res['matches']:
@@ -47,12 +82,24 @@ def retrieve_context(query):
             context_text_list.append(match['metadata'].get('text', ''))
         return contexts, "\n\n---\n\n".join(context_text_list)
     except Exception as e:
-        print(f"Error in retrieval: {e}")
+        print(f"Error during retrieval: {e}")
+        # מחזיר רשימה ריקה במקום לקרוס
         return [], ""
+
+# --- Endpoints ---
 
 @app.get("/")
 def read_root():
-    return {"status": "TED RAG System is Online on Vercel"}
+    # בדיקת בריאות - האם המפתחות קיימים?
+    status = "OK"
+    missing = []
+    if not LLMOD_API_KEY: missing.append("LLMOD_API_KEY")
+    if not PINECONE_API_KEY: missing.append("PINECONE_API_KEY")
+    
+    if missing:
+        status = f"MISSING KEYS: {', '.join(missing)}"
+    
+    return {"status": "TED RAG System is Online", "config_check": status}
 
 @app.get("/api/stats")
 def get_stats():
@@ -61,7 +108,12 @@ def get_stats():
 @app.post("/api/prompt")
 def ask_question(request: QueryRequest):
     question = request.question
-    context_objects, context_str = retrieve_context(question)
+    
+    try:
+        context_objects, context_str = retrieve_context(question)
+    except Exception as e:
+        # תופס שגיאות חיבור ומחזיר אותן כהודעה ברורה
+        return {"response": f"System Error: {str(e)}. Please check Vercel Logs.", "context": []}
     
     if not context_str:
         return {"response": "I don't know based on the provided TED data.", "context": []}
